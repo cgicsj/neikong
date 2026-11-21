@@ -232,7 +232,8 @@ def main():
     record = json.loads(record_path.read_text(encoding="utf-8-sig"))
     output = record_path.with_name("index.html")
     rendered = render_record(record, record_path.parent)
-    output.write_text(rendered, encoding="utf-8")
+    # Keep existing CRLF intact when writing on Windows.
+    output.write_bytes(rendered.encode("utf-8"))
     print(output)
 
 
