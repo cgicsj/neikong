@@ -1,6 +1,6 @@
 # neikong
 
-财政部统一报表系统内控编报下载技能。
+财政部统一报表系统内控编报和单位评价下载技能。
 
 仓库提供技能说明、参考资料和 HTML 生成脚本。单位填报记录、附件原件和 OCR 结果按指定位置在本地归档。
 
@@ -10,20 +10,21 @@
 | --- | --- | --- |
 | `nkbg-download-skill` | 基层单位 | 基本信息录入、单位内部控制情况 |
 | `hznkbg-download-skill` | 汇总部门 | 基本信息录入、部门内部控制情况 |
+| `nkpj-download-skill` | 基层单位 | 基本信息、评价指标打分 |
 
-两个技能均支持逐单位归档、逐题附件链接、当前模型优先 OCR、本地 OCR 补读、印章识读和离线 HTML 生成。
+编报技能支持逐单位归档、逐题附件链接、当前模型优先 OCR、本地 OCR 补读、印章识读和离线 HTML 生成。单位评价技能逐项目归档得分和附件，生成分层离线 HTML。
 
 ## 从公开仓库安装
 
 安装时可直接从 GitHub 下载，无需 GitHub 账号、登录或令牌。在 Codex 中可以直接输入以下指令。
 
-> 从 GitHub 仓库 cgicsj/neikong 的 main 分支安装 nkbg-download-skill 和 hznkbg-download-skill。
+> 从 GitHub 仓库 cgicsj/neikong 的 main 分支安装 nkbg-download-skill、hznkbg-download-skill 和 nkpj-download-skill。
 
 也可以用 Python 3 运行 Codex 技能安装器，以下为 Windows PowerShell 示例。
 
 ```powershell
 $installer = "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py"
-python -X utf8 $installer --repo cgicsj/neikong --ref main --method download --path nkbg-download-skill hznkbg-download-skill
+python -X utf8 $installer --repo cgicsj/neikong --ref main --method download --path nkbg-download-skill hznkbg-download-skill nkpj-download-skill
 ```
 
 只安装一个技能时，在 `--path` 后保留相应的目录名。安装器会保留已有的同名技能。安装成功后，在 Codex 中开启新会话即可调用。
@@ -49,6 +50,7 @@ python -X utf8 $installer --repo cgicsj/neikong --ref main --method download --p
 
 - 基层单位用 `$nkbg-download-skill 下载当前年度前 5 家基层单位的内控编报`
 - 汇总部门用 `$hznkbg-download-skill 下载当前年度前 5 家汇总部门的内控编报`
+- 基层单位评价用 `$nkpj-download-skill 下载当前年度基层单位内控评价`
 
 每个单位单独归档，打开批次目录中的 `index.html` 可浏览单位列表，并进入各单位页面查阅填报内容、附件原件、附件全文和盖章情况。
 
