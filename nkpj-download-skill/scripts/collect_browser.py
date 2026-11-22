@@ -149,7 +149,7 @@ def run(batch, session, downloads, limit=None, verify=False, unit=None):
         folder = batch / code
         output = folder / "record.json"
         old = load(output) if output.exists() else {}
-        complete = complete_indicators(old)
+        complete = complete_indicators(old) and old.get("supplementary", {}).get("confirmed") is True
         if (verify and not complete) or (not verify and complete):
             continue
         folder.mkdir(exist_ok=True)
@@ -163,6 +163,23 @@ def run(batch, session, downloads, limit=None, verify=False, unit=None):
             def stage(name, selector):
                 args = json.dumps({"row": row, "task": manifest["task"], "stage": name})
                 return browser.evaluate(f"({script})({args})", selector)
+
+            if (not verify and complete_indicators(old)
+                    and old.get("supplementary", {}).get("confirmed") is not True):
+                stage("open", "form.ivu-form")
+                browser.wait_for(".content_top", row["name"])
+                extra = stage("supplementary", ".content_top")
+                old["supplementary"] = extra.get("supplementary")
+                old.setdefault("issues", []).extend(extra.get("issues", []))
+                if not old["supplementary"] or not old["supplementary"].get("confirmed"):
+                    raise RuntimeError("补充说明未确认采集")
+                write_json(output, old)
+                collected += 1
+                print(f"{code}：补充说明已续采", flush=True)
+                build_batch(batch)
+                if limit is not None and collected >= limit:
+                    break
+                continue
 
             record = stage("open", "form.ivu-form")
             if not record["issues"]:
@@ -200,6 +217,16 @@ def run(batch, session, downloads, limit=None, verify=False, unit=None):
                     write_json(target, record)
                 if not piece or len(record["items"]) >= record.get("expected_items", 0):
                     break
+            if (record and record.get("basic") and complete_indicators(record)
+                    and not record.get("supplementary")):
+                extra = stage("supplementary", ".content_top")
+                record["supplementary"] = extra.get("supplementary")
+                record["issues"].extend(extra.get("issues", []))
+                if not record["supplementary"] or not record["supplementary"].get("confirmed"):
+                    raise RuntimeError("补充说明未确认采集")
+                write_json(progress, record)
+                if not target.exists() or len(record["items"]) >= len(load(target)["items"]):
+                    write_json(target, record)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             if record is not None:
                 record["issues"].append(str(error))

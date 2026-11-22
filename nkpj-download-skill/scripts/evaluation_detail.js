@@ -24,7 +24,7 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
   });
   const result = {
     unit_code: row.code, unit_name: row.name, captured_at: new Date().toISOString(),
-    report_version: row.cells[12] || null, basic: [], items: [], issues: [],
+    report_version: row.cells[12] || null, basic: [], items: [], supplementary: null, issues: [],
   };
   const basicSelector = ".ivu-collapse-item";
   const header = () => shown(".content_top").find(node =>
@@ -43,6 +43,26 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
   const current = () => shown(".treeNode.active").find(node => node.querySelector(".title"));
   const topicRoot = () => shown(".tiWrap .pc-container.container-self").find(node =>
     shown(".pc-container:not(.container-self)", node).length);
+  const supplementaryRoot = () => {
+    const tabs = header();
+    return shown(".ivu-tabs-tabpane-active").find(node => !node.contains(tabs))
+      ?? tabs?.closest(".ivu-modal-body") ?? tabs?.parentElement?.parentElement ?? null;
+  };
+  const captureSupplementary = root => {
+    const tabs = header();
+    const tables = shown("table", root).map(table => shown("tr", table).map(line =>
+      [...line.cells].map(cell => {
+        const inputs = shown(controls, cell);
+        return {text: clean(cell), value: inputs.length ? inputs.map(fieldValue).join("、") : null,
+          colspan: cell.colSpan, rowspan: cell.rowSpan};
+      })));
+    const fields = shown(".ivu-form-item", root).map(item => ({
+      label: clean(item.querySelector(".ivu-form-item-label,.label")),
+      value: clean(item.querySelector(".ivu-form-item-content")) || clean(item),
+    })).filter(item => item.label || item.value);
+    const text = clean(root).replace(clean(tabs), "").trim();
+    return {confirmed: true, captured_at: new Date().toISOString(), text, tables, fields};
+  };
   const groupTitles = ["一、组织层面内部控制", "二、业务层面内部控制", "三、内部监督", "四、补充指标"];
   const groups = () => [...document.querySelector(".unit-questionnaire-tree")?.children ?? []]
     .filter(node => node.querySelector(".treeNode.wrapNode"));
@@ -226,11 +246,27 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
       if (!result.basic.some(group => group.rows.flat().some(cell => cell.value === row.name))) {
         throw Error("明细基本信息的单位名称与列表不一致");
       }
-      if (shown(".demo-upload-list,.uploadWrapBtn").length) result.issues.push("基本信息出现附件入口，需核对后补采");
       return result;
     } else if (stage === "scores") {
       if (!header() || !clean(header()).includes(row.name) || modal().length) throw Error("明细身份或状态无法确认");
       one(signs("评价指标打分"), "评价指标打分").click();
+      return result;
+    } else if (stage === "supplementary") {
+      if (!header() || !clean(header()).includes(row.name) || modal().length) throw Error("明细身份或状态无法确认");
+      opened = true;
+      const root = supplementaryRoot();
+      if (!root) throw Error("无法定位补充说明内容区域");
+      const previous = clean(root);
+      const tab = one(signs("补充说明"), "补充说明");
+      tab.click();
+      const ready = await wait(() => {
+        const currentRoot = supplementaryRoot();
+        const selected = tab.getAttribute("aria-selected") === "true"
+          || /(?:^|\s)(?:active|current|selected)(?:\s|$)/.test(tab.className);
+        return currentRoot && (selected || clean(currentRoot) !== previous)
+          && !shown(busySelector, currentRoot).length ? currentRoot : null;
+      }, "补充说明内容");
+      result.supplementary = captureSupplementary(ready);
       return result;
     } else {
       if (!header() || modal().length || !shown(".content_top").some(node => clean(node).includes(row.name))) {
@@ -294,8 +330,7 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
     result.issues.push(error.message);
   } finally {
     try {
-      if (opened && (result.issues.length && result.items.length === 0
-          || result.items.at(-1)?.order === result.expected_items && result.expected_items)) closeDetails();
+      if (opened && (stage === "supplementary" || result.issues.length && result.items.length === 0)) closeDetails();
     } catch (error) {
       result.issues.push(error.message);
     }

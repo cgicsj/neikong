@@ -27,6 +27,7 @@ aside{position:sticky;top:1rem;max-height:90vh;overflow:auto}aside ul{margin:0;p
 .indicator-score{display:block;margin-top:.2rem;color:#31577a}
 .attachment{border-left:3px solid #b6cbe1;padding:.3rem .6rem;margin:.35rem 0}.notice{color:#596b81}
 .seal{margin:.4rem 0}.attachment-text{white-space:pre-wrap;margin:.35rem 0 .8rem}
+.supplementary-text{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:720px){.layout{grid-template-columns:1fr}aside{position:static;max-height:none}}
 """
 
@@ -159,6 +160,33 @@ def basic_table(group):
     return f'<h3>{text(group["title"])}</h3><div class="table-wrap"><table>' + "".join(rows) + "</table></div>"
 
 
+def supplementary_html(data, issues):
+    if not data or data.get("confirmed") is not True:
+        issues.append("补充说明未确认采集")
+        return '<p class="notice">补充说明尚未采集或待核</p>'
+    parts = []
+    if data.get("text"):
+        parts.append(f'<div class="supplementary-text">{text(data["text"])}</div>')
+    for index, rows in enumerate(data.get("tables", []), 1):
+        rendered = []
+        for row in rows:
+            cells = []
+            for cell in row:
+                tag = "td" if cell.get("value") is not None else "th"
+                value = cell.get("value") if cell.get("value") is not None else cell.get("text", "")
+                attrs = f' colspan="{int(cell.get("colspan", 1))}" rowspan="{int(cell.get("rowspan", 1))}"'
+                cells.append(f'<{tag}{attrs}>{text(value)}</{tag}>')
+            rendered.append("<tr>" + "".join(cells) + "</tr>")
+        parts.append(f'<div class="table-wrap"><table>{"".join(rendered)}</table></div>')
+    for field in data.get("fields", []):
+        label, value = field.get("label", ""), field.get("value", "")
+        if label or value:
+            parts.append(f'<p><strong>{text(label)}</strong> {text(value)}</p>')
+    if not parts:
+        parts.append('<p class="notice">页面已确认，未显示补充说明内容。</p>')
+    return "".join(parts)
+
+
 def final_score(section):
     # The portal score row ends in the columns 总分、评价、复核, in that order.
     raw = section.get("score") or ""
@@ -264,8 +292,11 @@ def portal_fields(document):
                 field.pop("list_confirmed")
             fields.append(field)
         items.append({**item, "fields": fields})
-    keys = ("unit_code", "unit_name", "report_version", "basic", "score_summary", "expected_items", "indicator_plan")
-    return (*[document.get(key) for key in keys], items)
+    supplementary = document.get("supplementary")
+    if isinstance(supplementary, dict):
+        supplementary = {key: value for key, value in supplementary.items() if key != "captured_at"}
+    keys = ("unit_code", "unit_name", "report_version", "basic", "score_summary", "expected_items", "indicator_plan", "supplementary")
+    return (*[supplementary if key == "supplementary" else document.get(key) for key in keys], items)
 
 
 def verify_source(folder, document, issues):
@@ -295,22 +326,39 @@ def build_unit(folder, row, task):
         raise ValueError(f"{folder.name}：归档主体与名录不一致")
     if not doc.get("basic"):
         issues.append("基本信息未采集")
+    if not doc.get("supplementary", {}).get("confirmed"):
+        issues.append("补充说明未采集或未确认")
     sections = doc.get("items", [])
     if not complete_indicators(doc):
         issues.append("评价项目尚未按系统目录完成四个大类的对账")
     verify_source(folder, doc, issues)
     menu, body = grouped_indicators(sections, folder, row["name"], issues)
+    supplementary = supplementary_html(doc.get("supplementary"), issues)
     issues = list(dict.fromkeys(issues))
     status = "待复核" if issues else "校验通过"
     basics = "".join(basic_table(group) for group in doc.get("basic", []))
+    upload_fields = [indicator_field(field) for item in sections for field in item.get("fields", [])]
+    upload_fields = [field for field in upload_fields if field.get("kind") == "attachment"]
+    attachments = [attachment for field in upload_fields for attachment in field.get("attachments", [])]
     write_html(folder / "index.html", row["name"], f"{task} · {row['code']}",
                '<nav><a href="../index.html">批次名录</a><a href="#basic">基本信息</a>'
-               '<a href="#scores">评价指标打分</a></nav>'
+               '<a href="#scores">评价指标打分</a><a href="#supplementary">补充说明</a></nav>'
                f'<section class="card" id="basic"><h2>基本信息</h2>{basics}</section>'
-               '<section class="card" id="scores"><h2>评价指标打分</h2></section>'
-               f'<div class="layout"><aside><strong>评价项目</strong><ul>{menu}</ul></aside><div>{body}</div></div>')
+               f'<section class="card" id="scores"><h2>评价指标打分</h2>'
+               f'<div class="layout"><aside><strong>评价项目</strong><ul>{menu}</ul></aside><div>{body}</div></div></section>'
+               f'<section class="card" id="supplementary"><h2>补充说明</h2>{supplementary}</section>')
     write_json(folder / "verification.json",
-               {"status": status, "verified_at": datetime.now(timezone.utc).isoformat(), "issues": issues})
+               {"status": status, "verified_at": datetime.now(timezone.utc).isoformat(),
+                "coverage": {"basic_information": bool(doc.get("basic")),
+                             "evaluation_projects": {"complete": complete_indicators(doc),
+                                                     "expected": doc.get("expected_items"),
+                                                     "captured": len(sections)},
+                             "supplementary": bool(doc.get("supplementary", {}).get("confirmed")),
+                             "scoring_page_attachments": {"listed": len(attachments),
+                                                          "downloaded": sum(bool(item.get("path")) for item in attachments),
+                                                          "ocr_complete": sum(item.get("status") in READING_COMPLETE
+                                                                              for item in attachments)}},
+                "issues": issues})
     return status
 
 
