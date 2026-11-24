@@ -1,4 +1,4 @@
-async ({row, task, download = false, offset = 0, stage = "items"}) => {
+async ({row, task, file = null, offset = 0, stage = "items"}) => {
   const clean = node => node?.innerText?.trim() ?? "";
   const visible = node => node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
   const shown = (selector, root = document) => [...root.querySelectorAll(selector)].filter(visible);
@@ -24,19 +24,21 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
   });
   const result = {
     unit_code: row.code, unit_name: row.name, captured_at: new Date().toISOString(),
-    report_version: row.cells[12] || null, basic: [], items: [], supplementary: null, issues: [],
+    report_version: row.report_version, basic: [], items: [], supplementary: null, issues: [],
   };
   const basicSelector = ".ivu-collapse-item";
   const header = () => shown(".content_top").find(node =>
     [...node.querySelectorAll(".progress-span")].some(tab => clean(tab) === "评价指标打分"));
   const modal = () => shown(".ivu-modal");
   let opened = false;
-  function closeDetails() {
+  async function closeDetails() {
     if (modal().length) {
       one(shown("button", one(modal(), "附件弹窗")).filter(b => clean(b) === "确定"), "附件清单关闭").click();
     }
+    await wait(() => !modal().length, "关闭附件清单");
     const container = header();
     if (container) one(shown("button", container).filter(b => clean(b) === "关闭"), "关闭明细").click();
+    await wait(() => !header() && !modal().length, "关闭明细");
   }
   const slot = selector => shown(selector).find(node => node.getAttribute("rowid") === row.code);
   const signs = label => shown(".progress-span", header()).filter(node => clean(node) === label);
@@ -108,79 +110,95 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
     return label.replace(/^[*＊]\s*/, "").trim();
   }
 
-  function selectedScores(block) {
-    // Scoring controls are disabled in 查看明细; their live checked state is still available.
+  function indicatorAnswer(block, label) {
+    // 查看明细 uses disabled controls, but their checked state and value are still available.
     const inputs = shown(controls, block);
-    const choices = inputs.filter(input => input.type === "radio" || input.type === "checkbox");
-    if (choices.length) {
-      return choices.filter(input => input.checked && input.closest("label"))
-        .map(input => ({label: clean(input.closest("label")), selected: true}))
-        .filter(answer => /^\d+(?:\.\d+)?\s*分$/.test(answer.label));
+    const choices = inputs.filter(input => input.type === "radio" || input.type === "checkbox")
+      .map(input => ({label: clean(input.closest("label")), selected: input.checked}));
+    const applicabilityOptions = new Set(["适用", "不适用"]);
+    if (label.startsWith("是否适用") || (choices.length && choices.every(answer => applicabilityOptions.has(answer.label)))) {
+      const selected = choices.filter(answer => answer.selected && applicabilityOptions.has(answer.label));
+      return {kind: "applicability", applicability: selected.length === 1 ? selected[0].label : null};
     }
-    return inputs.map(input => {
+
+    const scoreWithUnit = /^\d+(?:\.\d+)?\s*分$/;
+    if (choices.length) {
+      const scoreOptions = choices.filter(answer => scoreWithUnit.test(answer.label));
+      return scoreOptions.length ? {answers: scoreOptions.filter(answer => answer.selected)} : {kind: "unclassified"};
+    }
+    const valueFields = inputs.map(input => {
       const cell = input.closest(".multiple-blank-item");
       const label = cell ? clean(cell.previousElementSibling) : "";
       return {label, value: fieldValue(input)};
-    }).filter(answer => /^\d+(?:\.\d+)?\s*分$/.test(answer.value)
-      || (/得分|评分|分值/.test(answer.label) && /^\d+(?:\.\d+)?$/.test(answer.value)));
+    });
+    const scoreLabel = /得分|评分|分值/;
+    const scoreFields = valueFields.filter(answer => scoreWithUnit.test(answer.value) || scoreLabel.test(answer.label));
+    if (!scoreFields.length) return {kind: "unclassified"};
+    return {answers: scoreFields.filter(answer => scoreWithUnit.test(answer.value)
+      || /^\d+(?:\.\d+)?$/.test(answer.value))};
   }
   const nameOf = node => node.getAttribute("title") || clean(node);
   const busySelector = '.ivu-spin, .ivu-spin-fix, .ivu-table-loading, [aria-busy="true"]';
 
-  async function collectUploads(button, expected, question) {
+  async function collectUploads(button, expected, question, requested) {
     if (modal().length) throw Error("上一处弹窗尚未关闭");
     button.click();
     let dialog;
-    try {
-      const rows = await new Promise((resolve, reject) => {
-        const started = Date.now();
-        let previous = null;
-        let stableChecks = 0;
-        const check = () => {
-          dialog ??= modal().find(m => clean(m).includes("上传附件")
-            && !m.classList.contains("ease-enter-active")
-            && !m.classList.contains("ease-leave-active"));
-          if (!dialog || dialog.matches(busySelector) || shown(busySelector, dialog).length) {
-            previous = null;
-            stableChecks = 0;
-          } else {
-            const visibleRows = shown(".ivu-table-row", dialog);
-            const names = visibleRows.map(line => clean(line.cells?.[1]));
-            const completeRows = names.length > 0 && names.every(Boolean);
-            const emptyTable = shown(".ivu-table-tip, .ivu-table-empty", dialog)
-              .some(node => /暂无|无数据|没有数据/.test(clean(node)));
-            const signature = completeRows ? JSON.stringify(names) : emptyTable ? "empty" : null;
-            if (signature && signature === previous) stableChecks++;
-            else stableChecks = signature ? 1 : 0;
-            previous = signature;
-            if (stableChecks >= 5) {
-              resolve(completeRows ? visibleRows : []);
-              return;
-            }
+    async function readPage(page, previousPage) {
+      const started = Date.now();
+      let previous = null;
+      let stable = 0;
+      while (Date.now() - started < 16000) {
+        dialog ??= modal().find(m => clean(m).includes("上传附件")
+          && !m.classList.contains("ease-enter-active") && !m.classList.contains("ease-leave-active"));
+        const rows = dialog ? shown(".ivu-table-row", dialog) : [];
+        const active = dialog ? shown(".ivu-page-item-active", dialog) : [];
+        const current = active.length ? Number(clean(active[0])) : 1;
+        const names = rows.map(line => clean(line.cells?.[1]));
+        const empty = dialog && shown(".ivu-table-tip, .ivu-table-empty", dialog)
+          .some(node => /暂无|无数据|没有数据/.test(clean(node)));
+        const signature = dialog && current === page && !dialog.matches(busySelector)
+          && !shown(busySelector, dialog).length && (names.length && names.every(Boolean)
+            ? JSON.stringify(rows.map(clean)) : empty && page === 1 ? "empty" : null);
+        if (signature && signature !== previousPage) {
+          stable = signature === previous ? stable + 1 : 1;
+          if (stable >= 5 && (signature !== "empty" || Date.now() - started >= 1500)) {
+            return {rows, signature};
           }
-          if (Date.now() - started >= 16000) {
-            reject(Error("附件清单明细加载未确认"));
-            return;
-          }
-          setTimeout(check, 200);
-        };
-        check();
-      });
-      if (shown(".ivu-page", dialog).length) throw Error("附件弹窗含分页，需逐页补采");
-      const files = rows.map(line => {
-        const name = clean(line.cells[1]);
-        const buttons = shown("button", line).filter(b => clean(b) === "下载" && !b.disabled);
-        return {name, buttons};
-      });
-      if (expected.length && JSON.stringify([...expected].sort()) !== JSON.stringify(files.map(f => f.name).sort())) {
-        result.issues.push(`${question}：题面附件列表与弹窗不一致`);
+        } else {
+          stable = 0;
+        }
+        previous = signature;
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
+      throw Error("附件清单明细加载未确认");
+    }
+    try {
       const entries = [];
-      for (const {name, buttons} of files) {
-        const canDownload = buttons.length === 1;
-        if (download && canDownload) buttons[0].click();
-        if (!canDownload) result.issues.push(`${question} / ${name}：下载入口不可用或不唯一`);
-        entries.push({name, download_requested: download && canDownload});
+      let previousPage = null;
+      for (let page = 1; ; page++) {
+        const {rows, signature} = await readPage(page, previousPage);
+        for (const line of rows) {
+          const name = clean(line.cells[1]);
+          const metadata = [...line.cells].slice(2).map(clean);
+          const buttons = shown("button", line).filter(b => clean(b) === "下载" && !b.disabled);
+          if (buttons.length !== 1) result.issues.push(`${question} / ${name}：下载入口不可用或不唯一`);
+          const entry = {name, page, metadata};
+          if (requested && entries.length === requested.index) {
+            if (JSON.stringify(entry) !== JSON.stringify(requested.entry)) throw Error("附件清单与待下载条目不一致");
+            one(buttons, "单件附件下载").click();
+            return {requested: true};
+          }
+          entries.push(entry);
+        }
+        const next = shown(".ivu-page-next", dialog);
+        if (!next.length || next[0].classList.contains("ivu-page-disabled")) break;
+        previousPage = signature;
+        one(next, "附件下一页").click();
+      }
+      if (requested) throw Error("未找到待下载的附件条目");
+      if (expected.length && JSON.stringify([...expected].sort()) !== JSON.stringify(entries.map(f => f.name).sort())) {
+        result.issues.push(`${question}：题面附件列表与弹窗不一致`);
       }
       return entries;
     } finally {
@@ -192,7 +210,10 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
   }
 
   try {
-    if (stage === "open") {
+    if (stage === "close") {
+      await closeDetails();
+      return result;
+    } else if (stage === "open") {
       if (header() || modal().length) throw Error("有明细或弹窗已打开，请核查后再继续");
       const form = document.querySelector("form.ivu-form");
       if (!form || ![...form.querySelectorAll("input")].some(input => input.value === task)
@@ -215,9 +236,11 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
       }
       const main = await wait(() => slot(".body--wrapper tr[rowid]"), "目标单位行");
       const mainCells = [...main.cells].map(node => node.textContent.trim());
-      if (mainCells.length !== row.cells.length || mainCells[1] !== row.cells[1]
-        || mainCells[2] !== row.name || mainCells[3] !== row.code
-        || !/^(基层|基层单位)$/.test(mainCells[7]) || mainCells[12] !== row.cells[12]
+      const indexes = row.column_indexes;
+      if (mainCells.length !== row.cells.length || mainCells[indexes["单位名称"]] !== row.name
+        || mainCells[indexes["单位代码"]] !== row.code
+        || !/^(基层|基层单位)$/.test(mainCells[indexes["单位类型"]])
+        || (mainCells[indexes["上报日期"]] || null) !== row.report_version
         || Number(clean(pager.querySelector(".ivu-page-item-active"))) !== row.page) throw Error("单位行身份、报送时间或页码改变");
       const actions = shown(".fixed-right--wrapper tr[rowid]").find(node => node.getAttribute("rowid") === row.code);
       if (!actions || !shown(".button_text", actions).some(node => clean(node) === "更多")) {
@@ -281,6 +304,7 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
     result.indicator_plan = plan.map(({group, title}) => ({group, title}));
     const order = offset + 1;
     if (order <= result.expected_items) {
+      let uploadIndex = -1;
       const target = plan[offset];
       if (current() !== target.node) {
         const previous = topicRoot();
@@ -304,22 +328,30 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
           continue;
         }
         if (block.classList.contains("file-upload-question")) {
+          uploadIndex++;
+          if (file && file.field !== uploadIndex) continue;
           const label = "附件";
           const question = `${section.title} / 第${section.fields.filter(field => field.kind === "attachment").length + 1}处附件`;
           const field = {kind: "attachment", label, attachments: [], list_confirmed: false};
           const expected = shown(".fileName", block).map(nameOf);
           const buttons = shown(".uploadWrapBtn", block).filter(n => clean(n) === "查看附件");
           try {
-            field.attachments = await collectUploads(one(buttons, "逐题查看附件"), expected, question);
+            const files = await collectUploads(one(buttons, "逐题查看附件"), expected, question, file);
+            if (file) {
+              result.download_requested = files.requested;
+              return result;
+            }
+            field.attachments = files;
             field.list_confirmed = true;
           } catch (error) {
+            if (file) throw error;
             result.issues.push(`${question}：${error.message}`);
           }
           section.fields.push(field);
         } else {
           const label = indicatorText(block.parentElement.querySelector(":scope > .html-control"));
           if (label) {
-            section.fields.push({label, answers: selectedScores(block)});
+            section.fields.push({label, ...indicatorAnswer(block, label)});
           } else {
             result.issues.push(`${section.title}：指标题干未识别`);
           }
@@ -330,7 +362,7 @@ async ({row, task, download = false, offset = 0, stage = "items"}) => {
     result.issues.push(error.message);
   } finally {
     try {
-      if (opened && (stage === "supplementary" || result.issues.length && result.items.length === 0)) closeDetails();
+      if (opened && (stage === "supplementary" || result.issues.length && result.items.length === 0)) await closeDetails();
     } catch (error) {
       result.issues.push(error.message);
     }

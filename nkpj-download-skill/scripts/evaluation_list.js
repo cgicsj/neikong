@@ -32,15 +32,22 @@ async () => {
   } else {
     await ready(1);
   }
-  const headers = [...document.querySelectorAll(".vxe-table--header-wrapper .vxe-header--row")]
-    .find(row => [...row.cells].some(cell => clean(cell) === "单位代码"));
-  if (!headers) throw Error("未找到单位评价列表列头");
-  const columns = [...headers.cells].map(clean);
-  while (columns.at(-1) === "") columns.pop();
+  const required = ["单位代码", "单位名称", "单位类型", "上报日期", "操作"];
+  const headers = [...document.querySelectorAll(".vxe-table--header-wrapper .vxe-header--row")];
+  const candidates = headers.map(header => [...header.cells].map(clean));
+  for (const columns of [...candidates]) {
+    if (columns.slice(0, 4).join("|") === "|序号||序号") candidates.push(columns.slice(2));
+  }
+  const matches = candidates.filter(columns => required.every(name => columns.indexOf(name) >= 0
+    && columns.indexOf(name) === columns.lastIndexOf(name)) && (!total || mainRows().every(row =>
+    row.cells.length === columns.length && clean(row.cells[columns.indexOf("单位代码")]) === row.getAttribute("rowid"))));
+  const unique = [...new Map(matches.map(columns => [JSON.stringify(columns), columns])).values()];
+  if (unique.length !== 1) throw Error("无法将单位评价列头与正文对齐");
+  const [columns] = unique;
   const codeIndex = columns.indexOf("单位代码");
   const nameIndex = columns.indexOf("单位名称");
   const typeIndex = columns.indexOf("单位类型");
-  if ([codeIndex, nameIndex, typeIndex].includes(-1)) throw Error("单位身份列缺失");
+  const actionIndex = columns.indexOf("操作");
 
   const rows = [];
   const pages = Math.max(1, Math.ceil(total / pageSize()));
@@ -52,7 +59,7 @@ async () => {
           || !/^(基层|基层单位)$/.test(clean(cells[typeIndex]))) {
         throw Error(`第 ${page} 页身份或筛选不一致`);
       }
-      const actions = [...cells.at(-1).querySelectorAll(".button_text")].map(clean);
+      const actions = [...cells[actionIndex].querySelectorAll(".button_text")].map(clean);
       rows.push({page, code, name: clean(cells[nameIndex]), cells: cells.map(clean),
         eligible: actions.includes("更多"), has_detail: actions.includes("查看明细")});
     }

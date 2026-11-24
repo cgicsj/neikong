@@ -24,7 +24,7 @@ th{background:#eaf0f7}td.value{background:#f6f8fa;white-space:pre-wrap}.layout{d
 aside{position:sticky;top:1rem;max-height:90vh;overflow:auto}aside ul{margin:0;padding-left:1.25rem}aside a{display:block}
 .score,.field{white-space:pre-wrap;overflow-wrap:anywhere}.score{color:#476581;background:#f0f5fb;padding:.55rem .7rem;margin:0 0 1rem}
 .field{padding:.65rem 0;border-top:1px solid #e1e7f0}
-.indicator-score{display:block;margin-top:.2rem;color:#31577a}
+.indicator-score,.indicator-applicability,.indicator-unclassified{display:block;margin-top:.2rem;color:#31577a}
 .attachment{border-left:3px solid #b6cbe1;padding:.3rem .6rem;margin:.35rem 0}.notice{color:#596b81}
 .seal{margin:.4rem 0}.attachment-text{white-space:pre-wrap;margin:.35rem 0 .8rem}
 .supplementary-text{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -56,6 +56,7 @@ def write_html(path, title, meta, body):
 
 
 READING_COMPLETE = {"识读完成", "全文已提取"}
+APPLICABILITY_OPTIONS = ("适用", "不适用")
 SEAL_STATES = {"有可辨识印章", "有章但单位待复核", "未见印章", "无法判断"}
 SCORE_NUMBER = r"[0-9]+(?:\.[0-9]+)?"
 GROUP_TITLES = ("一、组织层面内部控制", "二、业务层面内部控制", "三、内部监督", "四、补充指标")
@@ -104,7 +105,10 @@ def seal_html(item, unit_name, location, issues):
             issues.append(f"{location} / {item['name']}：盖章单位待复核")
         else:
             organizations.append(name)
-            matches.append("一致" if normalized_name(name) in {target, target.removesuffix("(本级)")} else "不一致")
+            match = normalized_name(name) in {target, target.removesuffix("(本级)")}
+            matches.append("一致" if match else "不一致")
+            if not match:
+                issues.append(f"{location} / {item['name']}：盖章单位与填报单位不一致（{name}）")
     if not names:
         organizations.append("—" if status == "未见印章" else "无法判断")
         matches.append("不适用" if status == "未见印章" else "无法判断")
@@ -217,6 +221,14 @@ def indicator_field(field):
     if field.get("kind") == "attachment" or legacy_upload:
         return {"kind": "attachment", "label": "附件", "attachments": field.get("attachments", []),
                 "list_confirmed": field.get("list_confirmed")}
+    stem = indicator_label(field["label"])
+    if field.get("kind") == "applicability" or stem.startswith("是否适用"):
+        # Older records stored this question as a score row and may lack the choice.
+        choice = field.get("applicability")
+        return {"kind": "applicability", "label": stem,
+                "applicability": choice if choice in APPLICABILITY_OPTIONS else None}
+    if field.get("kind") == "unclassified":
+        return {"kind": "unclassified", "label": stem}
     scores = []
     for answer in field.get("answers", []):
         label = answer.get("label", "").strip()
@@ -225,7 +237,7 @@ def indicator_field(field):
                 or re.fullmatch(SCORE_NUMBER + r"\s*分", value)
                 or (re.search(r"得分|评分|分值", label) and re.fullmatch(SCORE_NUMBER, value))):
             scores.append(answer)
-    return {"label": indicator_label(field["label"]), "answers": scores}
+    return {"label": stem, "answers": scores}
 
 
 def evaluation_item(section, folder, unit_name, issues):
@@ -250,6 +262,14 @@ def evaluation_item(section, folder, unit_name, issues):
                     status = "附件清单待核"
                 attachments = f'<span class="notice">　{text(status)}</span>'
             content = attachments
+        elif field.get("kind") == "applicability":
+            choice = field["applicability"]
+            if choice is None:
+                issues.append(f"{location}：适用性待核对")
+            content = f'<span class="indicator-applicability">适用性：{text(choice or "待核对")}</span>'
+        elif field.get("kind") == "unclassified":
+            issues.append(f"{location}：题型待核对")
+            content = '<span class="indicator-unclassified">题型待核对</span>'
         else:
             values = []
             for answer in field["answers"]:
@@ -259,8 +279,11 @@ def evaluation_item(section, folder, unit_name, issues):
                 issues.append(f"{location}：未取得指标得分")
             content = f'<span class="indicator-score">指标得分：{text("；".join(values) or "未取得")}</span>'
         questions.append(f'<div class="field"><strong>{text(label)}</strong>{content}</div>')
+    score = final_score(section)
+    if score == "—":
+        issues.append(f"{section['title']}：最终得分未确认")
     return (f'<article id="item-{section["order"]}"><h4>{text(section["title"])}</h4>'
-            f'<div class="score">最终得分：{text(final_score(section))}</div>{"".join(questions)}</article>')
+            f'<div class="score">最终得分：{text(score)}</div>{"".join(questions)}</article>')
 
 
 def grouped_indicators(items, folder, unit_name, issues):
@@ -299,19 +322,33 @@ def portal_fields(document):
     return (*[supplementary if key == "supplementary" else document.get(key) for key in keys], items)
 
 
+def attachment_metadata(document):
+    return [attachment.get("metadata") for item in document.get("items", [])
+            for field in item["fields"] for attachment in field.get("attachments", [])]
+
+
 def verify_source(folder, document, issues):
     snapshot = folder / "source" / "portal-check.json"
+    attempt_file = snapshot.with_name("portal-attempt.json")
     if not snapshot.is_file():
         issues.append("独立网页复核尚未完成")
         return
     try:
         checked = load(snapshot)
+        if attempt_file.is_file():
+            attempt = load(attempt_file)
+            if attempt.get("status") != "completed" or checked.get("captured_at") != attempt.get("started_at"):
+                issues.append("最近一次独立网页复核未完成")
+                return
         first = datetime.fromisoformat(document["captured_at"].replace("Z", "+00:00"))
         last = datetime.fromisoformat(checked["captured_at"].replace("Z", "+00:00"))
         if first.utcoffset() is None or last.utcoffset() is None or last < first:
             issues.append("网页复核时间无效或早于采集时间")
         if checked.get("issues") or portal_fields(checked) != portal_fields(document):
             issues.append("独立网页复核记录有缺项或与归档内容不一致")
+        pairs = zip(attachment_metadata(document), attachment_metadata(checked))
+        if any(original is not None and original != current for original, current in pairs):
+            issues.append("独立网页复核的附件条目信息与归档不一致")
         if any(field.get("kind") == "attachment" and field["list_confirmed"] is not True
                for item in checked["items"] for field in map(indicator_field, item["fields"])):
             issues.append("独立网页复核存在未确认的附件清单")
@@ -324,11 +361,15 @@ def build_unit(folder, row, task):
     issues = list(doc.get("issues", []))
     if (doc.get("unit_code"), doc.get("unit_name")) != (row["code"], row["name"]):
         raise ValueError(f"{folder.name}：归档主体与名录不一致")
+    if doc.get("report_version") != row["report_version"]:
+        issues.append("归档上报时间与本批次名录不一致")
     if not doc.get("basic"):
         issues.append("基本信息未采集")
-    if not doc.get("supplementary", {}).get("confirmed"):
+    if not (doc.get("supplementary") or {}).get("confirmed"):
         issues.append("补充说明未采集或未确认")
     sections = doc.get("items", [])
+    if any(not item["fields"] for item in sections):
+        issues.append("有评价项目未取得指标题目")
     if not complete_indicators(doc):
         issues.append("评价项目尚未按系统目录完成四个大类的对账")
     verify_source(folder, doc, issues)
@@ -348,12 +389,12 @@ def build_unit(folder, row, task):
                f'<div class="layout"><aside><strong>评价项目</strong><ul>{menu}</ul></aside><div>{body}</div></div></section>'
                f'<section class="card" id="supplementary"><h2>补充说明</h2>{supplementary}</section>')
     write_json(folder / "verification.json",
-               {"status": status, "verified_at": datetime.now(timezone.utc).isoformat(),
+               {"status": status, "generated_at": datetime.now(timezone.utc).isoformat(),
                 "coverage": {"basic_information": bool(doc.get("basic")),
                              "evaluation_projects": {"complete": complete_indicators(doc),
                                                      "expected": doc.get("expected_items"),
                                                      "captured": len(sections)},
-                             "supplementary": bool(doc.get("supplementary", {}).get("confirmed")),
+                             "supplementary": bool((doc.get("supplementary") or {}).get("confirmed")),
                              "scoring_page_attachments": {"listed": len(attachments),
                                                           "downloaded": sum(bool(item.get("path")) for item in attachments),
                                                           "ocr_complete": sum(item.get("status") in READING_COMPLETE
@@ -362,23 +403,46 @@ def build_unit(folder, row, task):
     return status
 
 
-def build_batch(root):
+def load_manifest(root):
     manifest = load(root / "source" / "名录.json")
     rows = manifest["rows"]
     if len(rows) != manifest["total"] or len({row["code"] for row in rows}) != len(rows):
         raise ValueError("名单数量不一致或存在重复单位代码")
+    columns = manifest["columns"]
+    # The recorded legacy sample includes two leading cells from a fixed table header.
+    if columns[:4] == ["", "序号", "", "序号"] and rows and all(
+            len(row["cells"]) == len(columns) - 2 for row in rows):
+        columns = columns[2:]
+    columns = [name.strip() for name in columns]
+    required = ("单位名称", "单位代码", "单位类型", "上报日期", "操作")
+    if any(columns.count(name) != 1 for name in required):
+        raise ValueError("无法确认名录列名，请回到系统重新采集名录")
+    indexes = {name: columns.index(name) for name in required}
+    for row in rows:
+        cells = row["cells"]
+        if (len(cells) != len(columns) or cells[indexes["单位代码"]] != row["code"]
+                or cells[indexes["单位名称"]] != row["name"]
+                or cells[indexes["单位类型"]] not in {"基层", "基层单位"}
+                or ("更多" in cells[indexes["操作"]]) != row["eligible"]):
+            raise ValueError("名录表头与单位行不匹配，请回到系统重新采集名录")
+        row["report_version"] = cells[indexes["上报日期"]] or None
+        row["column_indexes"] = indexes
+    manifest["columns"] = columns
+    return manifest
+
+
+def build_batch(root):
+    manifest = load_manifest(root)
     totals = {}
     body = []
-    source_columns = manifest["columns"]
-    name_index = source_columns.index("单位名称")
-    hidden_columns = {"单位代码", "标记", "复核得分", "复核结果认定", "上报日期"}
-    visible_columns = [(index, name) for index, name in enumerate(source_columns[1:-1], 1)
+    hidden_columns = {"", "操作", "单位代码", "标记", "复核得分", "复核结果认定", "上报日期", "材料"}
+    visible_columns = [(index, name) for index, name in enumerate(manifest["columns"])
                        if name not in hidden_columns]
-    name_column = next(position for position, (index, _) in enumerate(visible_columns)
-                       if index == name_index)
+    name_column = next(position for position, (_, name) in enumerate(visible_columns)
+                       if name == "单位名称")
     columns = [name for _, name in visible_columns]
     columns.insert(name_column + 1, "采集状态")
-    eligible = [row for row in rows if row["eligible"]]
+    eligible = [row for row in manifest["rows"] if row["eligible"]]
     for row in eligible:
         code = row["code"]
         if Path(code).name != code or not code.isalnum():

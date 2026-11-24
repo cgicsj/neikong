@@ -42,7 +42,7 @@ python -X utf8 $installer --repo cgicsj/neikong --ref main --method download --p
 | 本地运行环境 | 准备可读写的输出目录和 Python 3.9 或以上版本，用于生成 HTML 和执行下载后校验。 |
 | 附件识读能力 | 能打开或解析下载文件，并渲染扫描件。扫描文字和印章可用图像识读或中文 OCR 处理。 |
 
-只做离线校验时，准备 `record.json`、附件原件、`index.html` 和独立取得的 `source/portal-check.json` 即可运行校验脚本。缺少网页复核记录的旧档标记为「待复核」。云端 Agent 如无法访问系统或已登录会话，可用已有材料执行离线校验。
+只做离线校验时，保留批次的 `source/名录.json`、单位的 `record.json`、附件原件和独立取得的 `source/portal-check.json`，再运行归档生成器生成 HTML 与核验记录。缺少网页复核记录的旧档标记为「待复核」。云端 Agent 如无法访问系统或已登录会话，可用已有材料执行离线校验。
 
 ### 调用示例
 
@@ -64,7 +64,11 @@ neikong/
 │   ├── SKILL.md
 │   ├── references/
 │   └── scripts/
-└── hznkbg-download-skill/
+├── hznkbg-download-skill/
+│   ├── SKILL.md
+│   ├── references/
+│   └── scripts/
+└── nkpj-download-skill/
     ├── SKILL.md
     ├── references/
     └── scripts/
@@ -80,6 +84,9 @@ python -X utf8 "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\qui
 
 python -X utf8 "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" `
   .\hznkbg-download-skill
+
+python -X utf8 "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" `
+  .\nkpj-download-skill
 ```
 
-两个技能均应返回 `Skill is valid!`。
+三个技能均应返回 `Skill is valid!`。
